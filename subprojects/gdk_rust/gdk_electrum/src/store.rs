@@ -85,7 +85,7 @@ pub struct RawStore {
     settings: Option<Settings>,
 
     /// transaction memos
-    memos: HashMap<Txid, String>,
+    memos: HashMap<AccountNum, HashMap<Txid, String>>,
 }
 
 pub struct StoreMeta {
@@ -319,15 +319,19 @@ impl StoreMeta {
         }
     }
 
-    // @shesek TODO per account
-    pub fn insert_memo(&mut self, txid: Txid, memo: &str) -> Result<(), Error> {
-        self.store.memos.insert(txid, memo.to_string());
+    pub fn insert_memo(
+        &mut self,
+        account_num: AccountNum,
+        txid: Txid,
+        memo: &str,
+    ) -> Result<(), Error> {
+        self.store.memos.entry(account_num).or_default().insert(txid, memo.to_string());
         self.flush_store()?;
         Ok(())
     }
 
-    pub fn get_memo(&self, txid: &Txid) -> Option<&String> {
-        self.store.memos.get(txid)
+    pub fn get_memo(&self, account_num: AccountNum, txid: &Txid) -> Option<&String> {
+        self.store.memos.get(&account_num).and_then(|a| a.get(txid))
     }
 
     pub fn insert_settings(&mut self, settings: Option<Settings>) -> Result<(), Error> {
