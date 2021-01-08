@@ -9,14 +9,14 @@ use bitcoin::util::bip32::{DerivationPath, ExtendedPubKey};
 use bitcoin::{BlockHash, Script, Transaction, Txid};
 use elements::OutPoint;
 use gdk_common::be::Unblinded;
-use gdk_common::be::{BEBlockHeader, BEOutPoint, BETransaction, BETransactions};
+use gdk_common::be::{BEBlockHeader, BETransaction, BETransactions};
 use gdk_common::model::{FeeEstimate, SPVVerifyResult, Settings};
 use gdk_common::NetworkId;
 use log::{info, warn};
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -321,36 +321,6 @@ impl StoreMeta {
         self.write("asset_registry", asset_registry)
     }
 
-    pub fn get_bitcoin_tx(&self, txid: &Txid) -> Result<Transaction, Error> {
-        match self.cache.all_txs.get(txid) {
-            Some(BETransaction::Bitcoin(tx)) => Ok(tx.clone()),
-            _ => Err(Error::Generic("expected bitcoin tx".to_string())),
-        }
-    }
-
-    pub fn get_liquid_tx(&self, txid: &Txid) -> Result<elements::Transaction, Error> {
-        match self.cache.all_txs.get(txid) {
-            Some(BETransaction::Elements(tx)) => Ok(tx.clone()),
-            _ => Err(Error::Generic("expected liquid tx".to_string())),
-        }
-    }
-
-    pub fn spent(&self) -> Result<HashSet<BEOutPoint>, Error> {
-        let mut result = HashSet::new();
-        for tx in self.cache.all_txs.values() {
-            let outpoints: Vec<BEOutPoint> = match tx {
-                BETransaction::Bitcoin(tx) => {
-                    tx.input.iter().map(|i| BEOutPoint::Bitcoin(i.previous_output)).collect()
-                }
-                BETransaction::Elements(tx) => {
-                    tx.input.iter().map(|i| BEOutPoint::Elements(i.previous_output)).collect()
-                }
-            };
-            result.extend(outpoints.into_iter());
-        }
-        Ok(result)
-    }
-
     pub fn fee_estimates(&self) -> Vec<FeeEstimate> {
         if self.cache.fee_estimates.is_empty() {
             let min_fee = match self.id {
@@ -363,6 +333,7 @@ impl StoreMeta {
         }
     }
 
+    // @shesek TODO per account
     pub fn insert_memo(&mut self, txid: Txid, memo: &str) -> Result<(), Error> {
         self.store.memos.insert(txid, memo.to_string());
         self.flush_store()?;
@@ -396,12 +367,26 @@ impl StoreMeta {
             SPVVerifyResult::Unconfirmed
         }
     }
-}
 
-impl StoreMeta {
     pub fn export_cache(&self) -> Result<RawCache, Error> {
         self.flush_cache()?;
         RawCache::try_new(&self.path, &self.cipher)
+    }
+}
+
+impl RawAccountCache {
+    pub fn get_bitcoin_tx(&self, txid: &Txid) -> Result<Transaction, Error> {
+        match self.all_txs.get(txid) {
+            Some(BETransaction::Bitcoin(tx)) => Ok(tx.clone()),
+            _ => Err(Error::Generic("expected bitcoin tx".to_string())),
+        }
+    }
+
+    pub fn get_liquid_tx(&self, txid: &Txid) -> Result<elements::Transaction, Error> {
+        match self.all_txs.get(txid) {
+            Some(BETransaction::Elements(tx)) => Ok(tx.clone()),
+            _ => Err(Error::Generic("expected liquid tx".to_string())),
+        }
     }
 }
 
