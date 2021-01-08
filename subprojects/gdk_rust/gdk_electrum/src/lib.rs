@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
-use std::{sync, thread, iter};
+use std::{iter, sync, thread};
 
 use crate::account::AccountNum;
 use crate::headers::bitcoin::HeadersChain;
@@ -942,69 +942,68 @@ impl Headers {
         let account_nums = self.store.read()?.account_nums();
 
         for account_num in account_nums {
+            let store_read = self.store.read()?;
+            let acc_store = store_read.account_store(account_num)?;
 
-        let store_read = self.store.read()?;
-        let acc_store = store_read.account_store(account_num)?;
+            // find unconfirmed transactions that were previously confirmed and had
+            // their SPV validation cached, to be cleared below
+            let remove_proof: Vec<Txid> = acc_store
+                .heights
+                .iter()
+                .filter(|(t, h)| h.is_none() && store_read.cache.txs_verif.get(*t).is_some())
+                .map(|(t, _)| t.clone())
+                .collect();
 
-        // find unconfirmed transactions that were previously confirmed and had
-        // their SPV validation cached, to be cleared below
-        let remove_proof: Vec<Txid> = acc_store
-            .heights
-            .iter()
-            .filter(|(t, h)| h.is_none() && store_read.cache.txs_verif.get(*t).is_some())
-            .map(|(t, _)| t.clone())
-            .collect();
+            // find confirmed transactions with no SPV validation cache
+            let needs_proof: Vec<(Txid, u32)> = acc_store
+                .heights
+                .iter()
+                .filter_map(|(t, h_opt)| Some((t, (*h_opt)?)))
+                .filter(|(t, _)| store_read.cache.txs_verif.get(*t).is_none())
+                .map(|(t, h)| (t.clone(), h))
+                .collect();
+            drop(acc_store);
+            drop(store_read);
 
-        // find confirmed transactions with no SPV validation cache
-        let needs_proof: Vec<(Txid, u32)> = acc_store
-            .heights
-            .iter()
-            .filter_map(|(t, h_opt)| Some((t, (*h_opt)?)))
-            .filter(|(t, _)| store_read.cache.txs_verif.get(*t).is_none())
-            .map(|(t, h)| (t.clone(), h))
-            .collect();
-        drop(acc_store);
-        drop(store_read);
-
-        let mut txs_verified = HashMap::new();
-        for (txid, height) in needs_proof {
-            let verified = match client.transaction_get_merkle(&txid, height as usize) {
-                Ok(proof) => match &self.checker {
-                    ChainOrVerifier::Chain(chain) => {
-                        chain.verify_tx_proof(&txid, height, proof).is_ok()
-                    }
-                    ChainOrVerifier::Verifier(verifier) => {
-                        if let Some(BEBlockHeader::Elements(header)) =
-                            self.store.read()?.cache.headers.get(&height)
-                        {
-                            verifier.verify_tx_proof(&txid, proof, &header).is_ok()
-                        } else {
-                            false
+            let mut txs_verified = HashMap::new();
+            for (txid, height) in needs_proof {
+                let verified = match client.transaction_get_merkle(&txid, height as usize) {
+                    Ok(proof) => match &self.checker {
+                        ChainOrVerifier::Chain(chain) => {
+                            chain.verify_tx_proof(&txid, height, proof).is_ok()
                         }
+                        ChainOrVerifier::Verifier(verifier) => {
+                            if let Some(BEBlockHeader::Elements(header)) =
+                                self.store.read()?.cache.headers.get(&height)
+                            {
+                                verifier.verify_tx_proof(&txid, proof, &header).is_ok()
+                            } else {
+                                false
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        warn!("failed fetching merkle inclusion proof for {}: {:?}", txid, e);
+                        false
                     }
-                },
-                Err(e) => {
-                    warn!("failed fetching merkle inclusion proof for {}: {:?}", txid, e);
-                    false
+                };
+
+                if verified {
+                    info!("proof for {} verified!", txid);
+                    txs_verified.insert(txid, SPVVerifyResult::Verified);
+                } else {
+                    warn!("proof for {} not verified!", txid);
+                    txs_verified.insert(txid, SPVVerifyResult::NotVerified);
                 }
-            };
-
-            if verified {
-                info!("proof for {} verified!", txid);
-                txs_verified.insert(txid, SPVVerifyResult::Verified);
-            } else {
-                warn!("proof for {} not verified!", txid);
-                txs_verified.insert(txid, SPVVerifyResult::NotVerified);
             }
-        }
-        proofs_done += txs_verified.len();
+            proofs_done += txs_verified.len();
 
-        let mut store_write = self.store.write()?;
+            let mut store_write = self.store.write()?;
 
-        store_write.cache.txs_verif.extend(txs_verified);
-        for txid in remove_proof {
-            store_write.cache.txs_verif.remove(&txid);
-        }
+            store_write.cache.txs_verif.extend(txs_verified);
+            for txid in remove_proof {
+                store_write.cache.txs_verif.remove(&txid);
+            }
         }
 
         Ok(proofs_done)
