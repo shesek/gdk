@@ -202,6 +202,12 @@ where
     E: Into<Error>,
     S: Session<E>,
 {
+    // XXX how to handle missing subaccount?
+    let account_num = input["subaccount"]
+        .as_u64()
+        .ok_or_else(|| Error::Other("get_transaction_details: missing subaccount".into()))?
+        as u32;
+
     // TODO: parse txid?.
     let txid = input["txid"]
         .as_str()
@@ -213,7 +219,10 @@ where
 
     let memo_type = input["memo_type"].as_u64().unwrap_or(0);
 
-    session.set_transaction_memo(txid, memo, memo_type as u32).map(|v| json!(v)).map_err(Into::into)
+    session
+        .set_transaction_memo(account_num, txid, memo, memo_type as u32)
+        .map(|v| json!(v))
+        .map_err(Into::into)
 }
 
 pub fn get_balance<S, E>(session: &S, input: &Value) -> Result<Value, Error>
