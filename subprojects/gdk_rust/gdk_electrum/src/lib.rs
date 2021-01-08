@@ -44,7 +44,6 @@ use elements::confidential::{self, Asset, Nonce};
 use gdk_common::{ElementsNetwork, NetworkId};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -349,33 +348,13 @@ impl Session<Error> for ElectrumSession {
         )
         .ok_or(Error::InvalidMnemonic)?;
         let secp = Secp256k1::new();
-        let xprv =
+
+        let master_xprv =
             ExtendedPrivKey::new_master(bitcoin::network::constants::Network::Testnet, &seed)?;
+        let master_xpub = ExtendedPubKey::from_private(&secp, &master_xprv);
 
-        // BIP44: m / purpose' / coin_type' / account' / change / address_index
-        // coin_type = 0 bitcoin, 1 testnet, 1776 liquid bitcoin as defined in https://github.com/satoshilabs/slips/blob/master/slip-0044.md
-        // slip44 suggest 1 for every testnet, so we are using it also for regtest
-        let coin_type: u32 = match self.network.id() {
-            NetworkId::Bitcoin(bitcoin_network) => match bitcoin_network {
-                bitcoin::Network::Bitcoin => 0,
-                bitcoin::Network::Testnet => 1,
-                bitcoin::Network::Regtest => 1,
-            },
-            NetworkId::Elements(elements_network) => match elements_network {
-                ElementsNetwork::Liquid => 1776,
-                ElementsNetwork::ElementsRegtest => 1,
-            },
-        };
-        // since we use P2WPKH-nested-in-P2SH it is 49 https://github.com/bitcoin/bips/blob/master/bip-0049.mediawiki
-        let path_string = format!("m/49'/{}'/0'", coin_type);
-        info!("Using derivation path {}/0|1/*", path_string);
-        let path = DerivationPath::from_str(&path_string)?;
-        let xprv = xprv.derive_priv(&secp, &path)?;
-        let xpub = ExtendedPubKey::from_private(&secp, &xprv);
-
-        let wallet_desc = format!("{}{:?}", xpub, self.network.id());
-        let wallet_id = hex::encode(sha256::Hash::hash(wallet_desc.as_bytes()));
-        let sync_interval = self.network.sync_interval.unwrap_or(7);
+        let wallet_id = format!("{}_{:?}", master_xpub, self.network.id());
+        let wallet_id = hex::encode(sha256::Hash::hash(wallet_id.as_bytes()));
 
         let master_blinding = if self.network.liquid {
             Some(asset_blinding_key_from_seed(&seed))
@@ -393,7 +372,7 @@ impl Session<Error> for ElectrumSession {
             Ok(wallet) => wallet.store.clone(),
             Err(_) => Arc::new(RwLock::new(StoreMeta::new(
                 &path,
-                xpub,
+                master_xpub,
                 master_blinding.clone(),
                 self.network.id(),
             )?)),
@@ -417,6 +396,8 @@ impl Session<Error> for ElectrumSession {
                 };
             });
         }
+
+        let sync_interval = self.network.sync_interval.unwrap_or(7);
 
         if self.network.spv_enabled.unwrap_or(false) {
             let checker = match self.network.id() {
@@ -524,8 +505,8 @@ impl Session<Error> for ElectrumSession {
                 store,
                 mnemonic.clone(),
                 self.network.clone(),
-                xprv,
-                xpub,
+                master_xprv,
+                master_xpub,
                 master_blinding,
             )?;
 
