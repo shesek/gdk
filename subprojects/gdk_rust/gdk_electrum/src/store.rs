@@ -1,3 +1,4 @@
+use crate::account::AccountNum;
 use crate::spv::CrossValidationResult;
 use crate::Error;
 use aes_gcm_siv::aead::{generic_array::GenericArray, AeadInPlace, NewAead};
@@ -37,6 +38,51 @@ pub type Store = Arc<RwLock<StoreMeta>>;
 /// It is fully reconstructable from xpub and data from electrum server (plus master blinding for elements)
 #[derive(Default, Serialize, Deserialize)]
 pub struct RawCache {
+    /// account-specific information (transactions, scripts, history, indexes, unblinded)
+    pub accounts: HashMap<AccountNum, RawAccountCache>,
+
+    /// contains all my tx and all prevouts (@shesek to be removed)
+    pub all_txs: BETransactions,
+
+    /// contains all my script up to an empty batch of BATCHSIZE (@shesek to be removed)
+    pub paths: HashMap<Script, DerivationPath>,
+
+    /// inverse of `paths` (@shesek to be removed)
+    pub scripts: HashMap<DerivationPath, Script>,
+
+    /// contains only my wallet txs with the relative heights (None if unconfirmed) (@shesek to be removed)
+    pub heights: HashMap<Txid, Option<u32>>,
+
+    /// contains headers at the height of my txs (used to show tx timestamps)
+    pub headers: HashMap<u32, BEBlockHeader>,
+
+    /// unblinded values (only for liquid) (@shesek to be removed)
+    pub unblinded: HashMap<OutPoint, Unblinded>,
+
+    /// verification status of Txid (could be only Verified or NotVerified, absence means InProgress)
+    pub txs_verif: HashMap<Txid, SPVVerifyResult>,
+
+    /// cached fee_estimates
+    pub fee_estimates: Vec<FeeEstimate>,
+
+    /// height and hash of tip of the blockchain
+    pub tip: (u32, BlockHash),
+
+    /// max used indexes for external derivation /0/* and internal derivation /1/* (change) (@shesek to be removed)
+    pub indexes: Indexes,
+
+    /// registry assets last modified, used when making the http request
+    pub assets_last_modified: String,
+
+    /// registry icons last modified, used when making the http request
+    pub icons_last_modified: String,
+
+    /// the result of the last spv cross-validation execution
+    pub cross_validation_result: Option<CrossValidationResult>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+pub struct RawAccountCache {
     /// contains all my tx and all prevouts
     pub all_txs: BETransactions,
 
@@ -49,32 +95,11 @@ pub struct RawCache {
     /// contains only my wallet txs with the relative heights (None if unconfirmed)
     pub heights: HashMap<Txid, Option<u32>>,
 
-    /// contains headers at the height of my txs (used to show tx timestamps)
-    pub headers: HashMap<u32, BEBlockHeader>,
-
     /// unblinded values (only for liquid)
     pub unblinded: HashMap<OutPoint, Unblinded>,
 
-    /// verification status of Txid (could be only Verified or NotVerified, absence means InProgress)
-    pub txs_verif: HashMap<Txid, SPVVerifyResult>,
-
-    /// cached fee_estimates
-    pub fee_estimates: Vec<FeeEstimate>,
-
-    /// height and hash of tip of the blockchain
-    pub tip: (u32, BlockHash),
-
     /// max used indexes for external derivation /0/* and internal derivation /1/* (change)
     pub indexes: Indexes,
-
-    /// registry assets last modified, used when making the http request
-    pub assets_last_modified: String,
-
-    /// registry icons last modified, used when making the http request
-    pub icons_last_modified: String,
-
-    /// the result of the last spv cross-validation execution
-    pub cross_validation_result: Option<CrossValidationResult>,
 }
 
 /// RawStore contains data that are not extractable from xpub+blockchain
@@ -277,6 +302,23 @@ impl StoreMeta {
         file.write(&vec)?;
         info!("end write {} bytes to {}", vec.len(), name);
         Ok(())
+    }
+
+    pub fn account_store(&self, account_num: AccountNum) -> Result<&RawAccountCache, Error> {
+        self.cache
+            .accounts
+            .get(&account_num)
+            .ok_or_else(|| Error::InvalidSubaccount(account_num.into()))
+    }
+
+    pub fn account_store_mut(
+        &mut self,
+        account_num: AccountNum,
+    ) -> Result<&mut RawAccountCache, Error> {
+        self.cache
+            .accounts
+            .get_mut(&account_num)
+            .ok_or_else(|| Error::InvalidSubaccount(account_num.into()))
     }
 
     pub fn read_asset_icons(&self) -> Result<Option<Value>, Error> {
