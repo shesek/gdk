@@ -372,7 +372,7 @@ impl Session<Error> for ElectrumSession {
         let xprv = xprv.derive_priv(&secp, &path)?;
         let xpub = ExtendedPubKey::from_private(&secp, &xprv);
 
-        let wallet_desc = format!("{}{:?}", xpub, self.network);
+        let wallet_desc = format!("{}{:?}", xpub, self.network.id());
         let wallet_id = hex::encode(sha256::Hash::hash(wallet_desc.as_bytes()));
         let sync_interval = self.network.sync_interval.unwrap_or(7);
 
