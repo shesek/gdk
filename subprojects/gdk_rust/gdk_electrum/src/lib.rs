@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
-use std::{sync, thread};
+use std::{sync, thread, iter};
 
 use crate::account::AccountNum;
 use crate::headers::bitcoin::HeadersChain;
@@ -938,12 +938,17 @@ impl Headers {
     }
 
     pub fn get_proofs(&mut self, client: &Client) -> Result<usize, Error> {
+        let mut proofs_done = 0;
+        let account_nums = self.store.read()?.account_nums();
+
+        for account_num in account_nums {
+
         let store_read = self.store.read()?;
+        let acc_store = store_read.account_store(account_num)?;
 
         // find unconfirmed transactions that were previously confirmed and had
         // their SPV validation cached, to be cleared below
-        let remove_proof: Vec<Txid> = store_read
-            .cache
+        let remove_proof: Vec<Txid> = acc_store
             .heights
             .iter()
             .filter(|(t, h)| h.is_none() && store_read.cache.txs_verif.get(*t).is_some())
@@ -951,14 +956,14 @@ impl Headers {
             .collect();
 
         // find confirmed transactions with no SPV validation cache
-        let needs_proof: Vec<(Txid, u32)> = store_read
-            .cache
+        let needs_proof: Vec<(Txid, u32)> = acc_store
             .heights
             .iter()
             .filter_map(|(t, h_opt)| Some((t, (*h_opt)?)))
             .filter(|(t, _)| store_read.cache.txs_verif.get(*t).is_none())
             .map(|(t, h)| (t.clone(), h))
             .collect();
+        drop(acc_store);
         drop(store_read);
 
         let mut txs_verified = HashMap::new();
@@ -992,12 +997,16 @@ impl Headers {
                 txs_verified.insert(txid, SPVVerifyResult::NotVerified);
             }
         }
-        let proofs_done = txs_verified.len();
+        proofs_done += txs_verified.len();
+
         let mut store_write = self.store.write()?;
+
         store_write.cache.txs_verif.extend(txs_verified);
         for txid in remove_proof {
             store_write.cache.txs_verif.remove(&txid);
         }
+        }
+
         Ok(proofs_done)
     }
 
@@ -1104,8 +1113,8 @@ impl Syncer {
                 }
             }
 
-            let new_txs = self.download_txs(&history_txs_id, &scripts, &client)?;
-            let headers = self.download_headers(&heights_set, &client)?;
+            let new_txs = self.download_txs(account.num(), &history_txs_id, &scripts, &client)?;
+            let headers = self.download_headers(account.num(), &heights_set, &client)?;
 
             let store_read = self.store.read()?;
             let acc_store = store_read.account_store(account.num())?;
@@ -1129,19 +1138,20 @@ impl Syncer {
                     txid_height
                 );
                 let mut store_write = self.store.write()?;
-                let acc_store = store_write.account_store_mut(account.num())?;
+                store_write.cache.headers.extend(headers);
+
+                let mut acc_store = store_write.account_store_mut(account.num())?;
                 acc_store.indexes = last_used;
                 acc_store.all_txs.extend(new_txs.txs.into_iter());
                 acc_store.unblinded.extend(new_txs.unblinds);
-                store_write.cache.headers.extend(headers);
 
                 // height map is used for the live list of transactions, since due to reorg or rbf tx
                 // could disappear from the list, we clear the list and keep only the last values returned by the server
-                store_write.cache.heights.clear();
-                store_write.cache.heights.extend(txid_height.into_iter());
+                acc_store.heights.clear();
+                acc_store.heights.extend(txid_height.into_iter());
+                acc_store.scripts.extend(scripts.clone().into_iter().map(|(a, b)| (b, a)));
+                acc_store.paths.extend(scripts.into_iter());
 
-                store_write.cache.scripts.extend(scripts.clone().into_iter().map(|(a, b)| (b, a)));
-                store_write.cache.paths.extend(scripts.into_iter());
                 store_write.flush()?;
 
                 updated_accounts.insert(account.num());
@@ -1162,13 +1172,17 @@ impl Syncer {
 
     fn download_headers(
         &self,
+        account_num: AccountNum,
         heights_set: &HashSet<u32>,
         client: &Client,
     ) -> Result<Vec<(u32, BEBlockHeader)>, Error> {
+        let heights_in_db: HashSet<u32> = {
+            let store_read = self.store.read()?;
+            let acc_store = store_read.account_store(account_num)?;
+            iter::once(0).chain(acc_store.heights.iter().filter_map(|(_, h)| *h)).collect()
+        };
+
         let mut result = vec![];
-        let mut heights_in_db: HashSet<u32> =
-            self.store.read()?.cache.heights.iter().filter_map(|(_, h)| *h).collect();
-        heights_in_db.insert(0);
         let heights_to_download: Vec<u32> =
             heights_set.difference(&heights_in_db).cloned().collect();
         if !heights_to_download.is_empty() {
@@ -1191,6 +1205,7 @@ impl Syncer {
 
     fn download_txs(
         &self,
+        account_num: AccountNum,
         history_txs_id: &HashSet<Txid>,
         scripts: &HashMap<Script, DerivationPath>,
         client: &Client,
@@ -1198,7 +1213,8 @@ impl Syncer {
         let mut txs = vec![];
         let mut unblinds = vec![];
 
-        let mut txs_in_db = self.store.read()?.cache.all_txs.keys().cloned().collect();
+        let mut txs_in_db =
+            self.store.read()?.account_store(account_num)?.all_txs.keys().cloned().collect();
         let txs_to_download: Vec<&Txid> = history_txs_id.difference(&txs_in_db).collect();
         if !txs_to_download.is_empty() {
             let txs_bytes_downloaded = client.batch_transaction_get_raw(txs_to_download)?;
@@ -1216,8 +1232,10 @@ impl Syncer {
                 if let BETransaction::Elements(tx) = &tx {
                     info!("compute OutPoint Unblinded");
                     for (i, output) in tx.output.iter().enumerate() {
+                        let store_read = self.store.read()?;
+                        let acc_store = store_read.account_store(account_num)?;
                         // could be the searched script it's not yet in the store, because created in the current run, thus it's searched also in the `scripts`
-                        if self.store.read()?.cache.paths.contains_key(&output.script_pubkey)
+                        if acc_store.paths.contains_key(&output.script_pubkey)
                             || scripts.contains_key(&output.script_pubkey)
                         {
                             let vout = i as u32;
